@@ -1,0 +1,4 @@
+.venv/
+ffmpeg-8.1.1-essentials_build/
+*.zip
+__pycache__/

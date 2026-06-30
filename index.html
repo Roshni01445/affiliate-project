@@ -1,0 +1,501 @@
+import base64
+import json
+import os
+import tempfile
+import threading
+import time
+import uuid
+import requests
+import re
+from flask import send_file, Flask, jsonify, request
+from PIL import Image
+import pillow_avif
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+import shutil
+
+app = Flask(__name__)
+
+# ==========================================
+# PATH & GLOBAL CONFIGURATION
+# ==========================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RESULTS_PATH = os.path.join(BASE_DIR, "results.json")
+
+# Directory mapping for storing generated image assets
+IMAGE_DIR = r"D:\affiliateproject\generated_images"
+os.makedirs(IMAGE_DIR, exist_ok=True) 
+
+RESULTS_LOCK = threading.Lock()
+PROFILE_LOCK = threading.Lock()
+JOB_TIMEOUT_SECONDS = 900  
+
+DEFAULT_CHROME_PATHS = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+]
+
+
+def resolve_chrome_executable_path():
+    env_path = os.environ.get("CHROME_EXECUTABLE_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
+    for path in DEFAULT_CHROME_PATHS:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def build_image_prompt(price):
+    price_str = str(price).strip()
+    if not price_str:
+        price_str = "0"
+
+    clean_digits = re.sub(r'[^\d]', '', price_str)
+    try:
+        base_price = int(clean_digits) if clean_digits else 0
+    except ValueError:
+        base_price = 0
+
+    fake_high_mrp = round(base_price * 2)
+
+    return (
+        f"Generate exactly ONE single standalone premium 4:5 vertical fashion editorial photograph for 'Kyra's Closet Finds'. "
+        f"CRITICAL: Do not create an image grid, do not create a collage, and do not create multiple options or a carousel gallery layout. Output only one single image card. "
+        f"SUBJECT: A beautifully lit portrait featuring a stunning young Indian girl model posing warmly, looking directly at the camera. "
+        f"She must be wearing the exact same outfit pattern, base color, and fabric suit design extracted from the attached reference garment. Style the outfit elegantly with matching white trousers. "
+        f"BACKGROUND: The model is set against a clean, continuous, plain light-cream studio paper background. "
+        f"BRANDING: Center 'Kyra's Closet Finds' in an elegant, modern script across the top area of the background frame. Include a small official Meesho logo in the bottom-left corner of the background canvas. "
+        f"FREESTANDING PRICE BADGE: Design a prominent, highly visible, floating graphic sale badge overlay placed cleanly near the lower side on the cream background frame. The badge must be freestanding and completely detached from the model's body or the product garment. "
+        f"Inside this freestanding graphic badge, display the pricing details cleanly: 'MRP: ~~₹{fake_high_mrp}~~ | Deal Price: ₹{clean_digits}' with the MRP clearly crossed out with a visible strikethrough. "
+        f"RESTRICTIONS: Ensure the absolute bottom-right corner of the cream background frame remains completely empty."
+    )
+
+
+def build_video_prompt():
+    return (
+        "Animate this fashion model image with subtle, natural human motion. Keep the camera static. "
+        "Maintain 1-to-1 consistency for her face, outfit details, and the background without any morphing or alterations."
+    )
+
+
+def load_results():
+    if not os.path.exists(RESULTS_PATH):
+        return {}
+    with open(RESULTS_PATH, "r", encoding="utf-8") as file_handle:
+        return json.load(file_handle)
+
+
+def save_results(data):
+    with open(RESULTS_PATH, "w", encoding="utf-8") as file_handle:
+        json.dump(data, file_handle)
+
+
+def update_result(job_id, payload):
+    with RESULTS_LOCK:
+        data = load_results()
+        data[job_id] = payload
+        save_results(data)
+
+
+def run_job(job_id, price, image_url):
+    job_done = threading.Event()
+
+    def safe_update(payload):
+        if job_done.is_set():
+            return
+        update_result(job_id, payload)
+
+    def timeout_handler():
+        if job_done.is_set():
+            return
+        update_result(job_id, {"status": "error", "message": "Job timed out"})
+        job_done.set()
+
+    timeout_timer = threading.Timer(JOB_TIMEOUT_SECONDS, timeout_handler)
+    timeout_timer.daemon = True
+    timeout_timer.start()
+
+    safe_update({"status": "processing", "message": "Downloading source product image..."})
+    chrome_path = resolve_chrome_executable_path()
+    if not chrome_path:
+        safe_update({"status": "error", "message": "Chrome executable not found"})
+        job_done.set()
+        timeout_timer.cancel()
+        return
+
+    temp_dir = tempfile.gettempdir()
+    temp_original_path = os.path.join(temp_dir, f"meesho_live_upload_original_{job_id}")
+    temp_image_path = os.path.join(temp_dir, f"meesho_live_upload_{job_id}.png")
+
+    try:
+        response = requests.get(image_url, stream=True, timeout=15)
+        if response.status_code == 200:
+            content_type = response.headers.get("Content-Type", "")
+            is_avif = "image/avif" in content_type.lower() or image_url.lower().endswith(".avif")
+            temp_original_path = temp_original_path + (".avif" if is_avif else ".img")
+            
+            with open(temp_original_path, "wb") as f:
+                for chunk in response.iter_content(1024):
+                    f.write(chunk)
+                    
+            if is_avif:
+                image = Image.open(temp_original_path)
+                image.save(temp_image_path, format="PNG")
+            else:
+                temp_image_path = temp_original_path
+        else:
+            safe_update({"status": "error", "message": "Failed to download product image"})
+            job_done.set()
+            timeout_timer.cancel()
+            return
+    except Exception as e:
+        safe_update({"status": "error", "message": str(e)})
+        job_done.set()
+        timeout_timer.cancel()
+        return
+
+    image_prompt_text = build_image_prompt(price)
+    video_prompt_text = build_video_prompt()
+    
+    try:
+        with open(temp_image_path, "rb") as image_file:
+            image_b64 = base64.b64encode(image_file.read()).decode("ascii")
+    except Exception as e:
+        safe_update({"status": "error", "message": f"Failed to prepare image clipboard data: {str(e)}"})
+        job_done.set()
+        timeout_timer.cancel()
+        return
+
+    downloaded_img_path = os.path.join(IMAGE_DIR, f"{job_id}.png")
+    downloaded_vid_path = os.path.join(IMAGE_DIR, f"{job_id}.mp4")
+
+    # --- IN-SESSION DUAL PHASE PIPELINE ---
+    try:
+        with PROFILE_LOCK, sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=os.path.abspath("chrome_automation_profile"),
+                executable_path=chrome_path,
+                headless=False,
+                accept_downloads=True,
+                ignore_default_args=["--enable-automation"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-web-security",
+                ],
+            )
+            context.grant_permissions(["clipboard-read", "clipboard-write"], origin="https://gemini.google.com")
+
+            page = context.pages[0] if context.pages else context.new_page()
+            page.set_default_timeout(180000)
+            page.set_default_navigation_timeout(180000)
+            
+            # -------------------------------------------------------------
+            # --- PHASE 1: GENERATE LOOKBOOK IMAGE ---
+            # -------------------------------------------------------------
+            safe_update({"status": "processing", "message": "Opening Gemini Session..."})
+            page.goto("https://gemini.google.com/app", wait_until="domcontentloaded")
+            
+            prompt_selector = 'div[id="utterance-input"], div[contenteditable="true"], textarea, chat-input'
+            page.wait_for_selector(prompt_selector, timeout=60000, state="visible")
+            page.wait_for_timeout(2000)
+
+            chat_box = page.locator(prompt_selector).first
+
+            for attempt in range(3):
+                try:
+                    chat_box.click()
+                    page.wait_for_timeout(300)
+                    chat_box.press("Control+A")
+                    chat_box.press("Backspace")
+                    page.evaluate(
+                        "async ({ text }) => { await navigator.clipboard.writeText(text); }",
+                        {"text": image_prompt_text},
+                    )
+                    chat_box.press("Control+V")
+                    page.wait_for_timeout(2000)
+                    
+                    pasted_text = page.evaluate(
+                        """(selector) => {
+                            const el = document.querySelector(selector);
+                            if (!el) return '';
+                            if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return el.value || '';
+                            return el.innerText || el.textContent || '';
+                        }""", prompt_selector
+                    )
+                    if pasted_text.strip()[:10] in image_prompt_text:
+                        break
+                except Exception:
+                    if attempt == 2: raise
+                page.wait_for_timeout(1500)
+
+            page.evaluate(
+                """async ({ imageB64, mimeType, selector }) => {
+                    const target = document.querySelector(selector);
+                    if (!target) throw new Error("Prompt element not found.");
+                    const dataUrl = `data:${mimeType};base64,${imageB64}`;
+                    const response = await fetch(dataUrl);
+                    const blob = await response.blob();
+                    const item = new ClipboardItem({ [mimeType]: blob });
+                    await navigator.clipboard.write([item]);
+                }""",
+                {"imageB64": image_b64, "mimeType": "image/png", "selector": prompt_selector},
+            )
+            chat_box.click()
+            chat_box.press("Control+V")
+            page.wait_for_timeout(4000)
+
+            send_btn = page.locator('button[aria-label="Send message"], button.send-button, mat-icon:has-text("send"), button[type="submit"], button[data-testid="send-button"]').first
+            send_btn.click()
+
+            print(f"[{job_id}] Initializing generation state tracking buffer...")
+            page.wait_for_timeout(8000)  
+
+            try:
+                page.locator('text=Creating your image, div[aria-label*="Generating"]').first.wait_for(state="visible", timeout=20000)
+                print(f"[{job_id}] Generation progress verified. Monitoring rendering stream...")
+            except PlaywrightTimeoutError: 
+                pass 
+
+            page.locator('text=Creating your image, div[aria-label*="Generating"]').first.wait_for(state="hidden", timeout=240000)
+            print(f"[{job_id}] Gemini generation complete. Initializing browser-level download tracking layer...")
+            page.wait_for_timeout(10000)
+
+            # --- BULLETPROOF INTERCEPT DOWNLOAD LAYER ---
+            img_download_success = False
+            try:
+                # Find and target the real download button UI icon directly
+                download_button = page.locator('button[aria-label*="Download"], button:has-text("Download"), a[aria-label*="Download"], button:has(svg[aria-label*="Download"]), button[data-test-id="download-image-button"]').first
+                
+                if download_button.count() > 0:
+                    print(f"[{job_id}] Activating download stream handler click...")
+                    with page.expect_download(timeout=60000) as download_info:
+                        download_button.click()
+                    download = download_info.value
+                    download.save_as(downloaded_img_path)
+                    img_download_success = True
+                    print("✅ Image successfully intercepted and saved locally via browser stream layer.")
+            except Exception as e:
+                print(f"⚠️ Direct download link click failed: {e}. Activating fallback scanner...")
+                img_download_success = False
+
+            # --- BACKUP URL STREAM RETRIEVAL (ONLY IF INTERCEPT FAILS) ---
+            if not img_download_success or not os.path.exists(downloaded_img_path):
+                for scan_attempt in range(12):
+                    page.wait_for_timeout(4000)
+                    image_probe = page.evaluate("""() => {
+                        const responseContainers = document.querySelectorAll('div[data-content-type="model"], message-content, .gmat-image-card');
+                        let candidates = [];
+                        responseContainers.forEach(container => {
+                            const imgs = container.querySelectorAll('img');
+                            imgs.forEach(img => {
+                                const src = img.getAttribute('src') || '';
+                                const w = img.naturalWidth || 0;
+                                if (src.includes('googleusercontent') && !src.includes('s64') && w >= 300) {
+                                    candidates.push({ src: src, size: w * (img.naturalHeight || 0) });
+                                }
+                            });
+                        });
+                        if (candidates.length > 0) {
+                            candidates.sort((a, b) => b.size - a.size);
+                            return { final: candidates[0].src };
+                        }
+                        return { final: null };
+                    }""")
+                    
+                    final_image_url = image_probe.get("final")
+                    if final_image_url and final_image_url.startswith("http"):
+                        try:
+                            fallback_response = requests.get(final_image_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
+                            if fallback_response.status_code == 200:
+                                with open(downloaded_img_path, "wb") as file_handle:
+                                    file_handle.write(fallback_response.content)
+                                img_download_success = True
+                                print("✅ Lookbook image successfully rescued via fallback stream scanner.")
+                                break
+                        except Exception:
+                            pass
+
+            if not img_download_success or not os.path.exists(downloaded_img_path):
+                raise RuntimeError("Failed to download image via direct file streaming or raw URL mapping paths.")
+
+            # -------------------------------------------------------------
+            # --- PHASE 2: IN-SESSION VIDEO ANIMATION PIPELINE ---
+            # -------------------------------------------------------------
+            safe_update({"status": "processing", "message": "Image saved. Starting Video Generation Phase..."})
+            
+            try:
+                new_chat_btn = page.locator('button[aria-label="New chat"], .new-chat-button, mat-icon:has-text("add")').first
+                if new_chat_btn.count() > 0 and new_chat_btn.is_visible():
+                    new_chat_btn.click()
+                    page.wait_for_timeout(3000)
+            except Exception:
+                page.goto("https://gemini.google.com/app", wait_until="domcontentloaded")
+                
+            page.wait_for_selector(prompt_selector, timeout=120000, state="visible")
+            page.wait_for_timeout(3000)
+
+            chat_box = page.locator(prompt_selector).first
+
+            file_input = page.locator('input[type="file"], input[accept*="image"]').first
+            file_input.set_input_files(downloaded_img_path)
+            page.wait_for_timeout(5000) 
+
+            chat_box.click()
+            chat_box.press("Control+A")
+            chat_box.press("Backspace")
+            page.evaluate(
+                "async ({ text }) => { await navigator.clipboard.writeText(text); }",
+                {"text": video_prompt_text},
+            )
+            chat_box.press("Control+V")
+            page.wait_for_timeout(2000)
+
+            send_btn = page.locator('button[aria-label="Send message"], button.send-button, mat-icon:has-text("send"), button[type="submit"], button[data-testid="send-button"]').first
+            send_btn.click()
+            
+            page.wait_for_timeout(8000)
+            print(f"[{job_id}] Processing video rendering inside Gemini...")
+            
+            try:
+                page.locator('text=Generating video, text=Creating your video, div[aria-label*="video"]').first.wait_for(state="visible", timeout=25000)
+            except PlaywrightTimeoutError: pass
+
+            page.locator('text=Generating video, text=Creating your video, div[aria-label*="video"]').first.wait_for(state="hidden", timeout=240000)
+            page.wait_for_timeout(15000)
+
+            # Download video asset from thread space
+            safe_update({"status": "processing", "message": "Downloading lookbook video asset..."})
+            video_download_button = page.locator('button[aria-label*="Download video"], button:has-text("Download video"), mat-icon:has-text("download_video"), button[aria-label*="Download"]').last
+            
+            with page.expect_download(timeout=90000) as video_download_info:
+                video_download_button.click()
+            video_download = video_download_info.value
+            video_download.save_as(downloaded_vid_path)
+
+            print("🚀 Automated Multi-Phase job completed successfully!")
+            context.close()
+
+    except Exception as exc:
+        print(f"❌ Automation runtime crash detected: {str(exc)}")
+        safe_update({"status": "error", "message": f"Automation error pipeline breakdown: {str(exc)}"})
+        job_done.set()
+        timeout_timer.cancel()
+        return
+
+    if os.path.exists(downloaded_img_path) and os.path.exists(downloaded_vid_path):
+        safe_update({
+            "status": "success",
+            "image_url": f"/image/{job_id}.jpg",
+            "image_full_url": f"/image/{job_id}.jpg",
+            "video_url": f"/video/{job_id}.mp4",
+            "video_full_url": f"/video/{job_id}.mp4",
+            "message": "Collage picture asset and continuous mp4 video post rendered and saved locally with complete success!"
+        })
+    else:
+        safe_update({"status": "error", "message": "Failed to verify pair matching."})
+
+    job_done.set()
+    timeout_timer.cancel()
+    if os.path.exists(temp_image_path):
+        try: os.remove(temp_image_path)
+        except: pass
+    if os.path.exists(temp_original_path) and temp_original_path != temp_image_path:
+        try: os.remove(temp_original_path)
+        except: pass
+
+
+@app.route("/generate-collage", methods=["POST"])
+def generate_collage():
+    data = request.get_json(silent=True) or {}
+    price = data.get("price")
+    image_url = data.get("image_url")
+
+    if not price or not image_url:
+        return jsonify({"status": "error", "message": "Missing price or image_url"}), 400
+
+    job_id = uuid.uuid4().hex
+    update_result(job_id, {"status": "pending"})
+    thread = threading.Thread(target=run_job, args=(job_id, price, image_url), daemon=True)
+    thread.start()
+
+    return jsonify({"status": "accepted", "job_id": job_id}), 202
+
+
+@app.route("/result/<job_id>", methods=["GET"])
+def get_result(job_id):
+    with RESULTS_LOCK:
+        data = load_results()
+    if job_id not in data:
+        return jsonify({"status": "error", "message": "Unknown job_id"}), 404
+    return jsonify(data[job_id])
+
+
+@app.route("/image/<filename>", methods=["GET"])
+def get_image(filename):
+    job_id = filename.split('.')[0]
+    out_path = os.path.join(IMAGE_DIR, f"{job_id}.jpg")
+    
+    if os.path.exists(out_path):
+        try:
+            with Image.open(out_path) as check_img:
+                if check_img.size == (1080, 1350):
+                    return send_file(out_path, mimetype="image/jpeg")
+        except:
+            pass
+        
+    raw_file_path = None
+    if os.path.exists(IMAGE_DIR):
+        for f in os.listdir(IMAGE_DIR):
+            if f == job_id or f.startswith(job_id + "."):
+                raw_file_path = os.path.join(IMAGE_DIR, f)
+                break
+            
+    if raw_file_path:
+        try:
+            img = Image.open(raw_file_path).convert("RGB")
+            width, height = img.size
+            
+            target_width = 1080
+            target_height = 1350
+            target_ratio = 4.0 / 5.0
+            current_ratio = width / float(height)
+            
+            if abs(current_ratio - target_ratio) > 0.0001:
+                if current_ratio > target_ratio:
+                    new_width = int(height * target_ratio)
+                    offset = (width - new_width) // 2
+                    img = img.crop((offset, 0, offset + new_width, height))
+                else:
+                    new_height = int(width / target_ratio)
+                    offset = (height - new_height) // 2
+                    img = img.crop((0, offset, width, offset + new_height))
+            
+            img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+            img.save(out_path, "JPEG", quality=95)
+            return send_file(out_path, mimetype="image/jpeg")
+            
+        except Exception as e:
+            print(f"Error converting image: {e}")
+            return send_file(raw_file_path)
+            
+    return jsonify({"status": "error", "message": "Image not found"}), 404
+
+
+@app.route("/video/<filename>", methods=["GET"])
+def get_video(filename):
+    job_id = filename.split('.')[0]
+    video_path = os.path.join(IMAGE_DIR, f"{job_id}.mp4")
+
+    if os.path.exists(video_path):
+        return send_file(
+            video_path,
+            mimetype="video/mp4",
+            as_attachment=False
+        )
+
+    return jsonify({"status": "error", "message": "Video not found"}), 404
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

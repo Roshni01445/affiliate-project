@@ -1,0 +1,7 @@
+pyTelegramBotAPI
+flask
+requests
+pillow
+pillow-avif-plugin
+playwright
+playwright-stealth
