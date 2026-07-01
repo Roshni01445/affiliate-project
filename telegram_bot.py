@@ -37,7 +37,8 @@ N8N_POSTING_URL = os.environ.get("N8N_POSTING_URL", "https://n8n-production-3b51
 
 HAS_BOT_TOKEN = bool(BOT_TOKEN_RAW and ":" in BOT_TOKEN_RAW)
 ENABLE_TELEGRAM_BOT = os.environ.get("ENABLE_TELEGRAM_BOT", "0").strip().lower() in {"1", "true", "yes", "on"}
-RUN_TELEGRAM = HAS_BOT_TOKEN and ENABLE_TELEGRAM_BOT and os.environ.get("SPACE_ID") is None
+RUNNING_ON_HF_SPACES = any(key.startswith("SPACE_") for key in os.environ) or os.environ.get("SYSTEM", "").strip().lower() == "spaces"
+RUN_TELEGRAM = HAS_BOT_TOKEN and ENABLE_TELEGRAM_BOT and not RUNNING_ON_HF_SPACES
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_PATH = os.path.join(BASE_DIR, "results.json")
