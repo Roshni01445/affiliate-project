@@ -11,6 +11,7 @@ import base64
 import tempfile
 import re
 import shutil
+import socket
 from flask import Flask, jsonify, request, send_file
 from PIL import Image
 import pillow_avif
@@ -920,14 +921,43 @@ def _start_flask_server():
     port = int(os.environ.get("PORT", "7860"))
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
+def _is_port_available(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1)
+        return sock.connect_ex(("127.0.0.1", port)) != 0
+
+def _run_bot_polling_with_retries():
+    if not HAS_BOT_TOKEN:
+        return
+
+    backoff_seconds = 5
+    while True:
+        try:
+            bot.infinity_polling(
+                none_stop=True,
+                timeout=60,
+                long_polling_timeout=60,
+                allowed_updates=None,
+            )
+        except Exception as exc:
+            print(f"Telegram polling failed: {exc}")
+            print(f"Retrying Telegram polling in {backoff_seconds} seconds...")
+            time.sleep(backoff_seconds)
+            backoff_seconds = min(backoff_seconds * 2, 300)
+
 if __name__ == "__main__":
     if not HAS_BOT_TOKEN:
         print("BOT_TOKEN is not set. Telegram polling is disabled; Flask API will still start.")
     else:
         print("Bot execution loop initialized. Polling for triggers...")
-    threading.Thread(target=_start_flask_server, daemon=True).start()
+    port = int(os.environ.get("PORT", "7860"))
+    if _is_port_available(port):
+        threading.Thread(target=_start_flask_server, daemon=True).start()
+    else:
+        print(f"Port {port} is already in use. Skipping local Flask server startup.")
+
     if HAS_BOT_TOKEN:
-        bot.infinity_polling()
+        _run_bot_polling_with_retries()
     else:
         while True:
             time.sleep(3600)
