@@ -36,6 +36,8 @@ N8N_TRIGGER_URL = os.environ.get("N8N_TRIGGER_URL", "https://n8n-production-3b51
 N8N_POSTING_URL = os.environ.get("N8N_POSTING_URL", "https://n8n-production-3b51.up.railway.app/webhook-test/posting")
 
 HAS_BOT_TOKEN = bool(BOT_TOKEN_RAW and ":" in BOT_TOKEN_RAW)
+ENABLE_TELEGRAM_BOT = os.environ.get("ENABLE_TELEGRAM_BOT", "0").strip().lower() in {"1", "true", "yes", "on"}
+RUN_TELEGRAM = HAS_BOT_TOKEN and ENABLE_TELEGRAM_BOT and os.environ.get("SPACE_ID") is None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_PATH = os.path.join(BASE_DIR, "results.json")
@@ -927,7 +929,7 @@ def _is_port_available(port):
         return sock.connect_ex(("127.0.0.1", port)) != 0
 
 def _run_bot_polling_with_retries():
-    if not HAS_BOT_TOKEN:
+    if not RUN_TELEGRAM:
         return
 
     backoff_seconds = 5
@@ -946,8 +948,8 @@ def _run_bot_polling_with_retries():
             backoff_seconds = min(backoff_seconds * 2, 300)
 
 if __name__ == "__main__":
-    if not HAS_BOT_TOKEN:
-        print("BOT_TOKEN is not set. Telegram polling is disabled; Flask API will still start.")
+    if not RUN_TELEGRAM:
+        print("Telegram polling is disabled in this environment; Flask API will still start.")
     else:
         print("Bot execution loop initialized. Polling for triggers...")
     port = int(os.environ.get("PORT", "7860"))
@@ -956,7 +958,7 @@ if __name__ == "__main__":
     else:
         print(f"Port {port} is already in use. Skipping local Flask server startup.")
 
-    if HAS_BOT_TOKEN:
+    if RUN_TELEGRAM:
         _run_bot_polling_with_retries()
     else:
         while True:
