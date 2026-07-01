@@ -17,7 +17,12 @@ import pillow_avif
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # CONFIGURATION
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = (
+    os.environ.get("BOT_TOKEN")
+    or os.environ.get("TELEGRAM_BOT_TOKEN")
+    or os.environ.get("TG_BOT_TOKEN")
+    or ""
+)
 GOOGLE_SHEET_WEBHOOK_URL = os.environ.get(
     "GOOGLE_SHEET_WEBHOOK_URL",
     "https://script.google.com/macros/s/AKfycbzOpYU6DGMqNtoFBg8E_i7kq4_rhI1I6AveEqfPcpkJQcjXFtUjmObzSM8_iFwnczGm/exec",
@@ -25,8 +30,7 @@ GOOGLE_SHEET_WEBHOOK_URL = os.environ.get(
 N8N_TRIGGER_URL = os.environ.get("N8N_TRIGGER_URL", "https://n8n-production-3b51.up.railway.app/webhook-test/n8n-trigger")
 N8N_POSTING_URL = os.environ.get("N8N_POSTING_URL", "https://n8n-production-3b51.up.railway.app/webhook-test/posting")
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN environment variable is required")
+HAS_BOT_TOKEN = bool(BOT_TOKEN)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_PATH = os.path.join(BASE_DIR, "results.json")
@@ -912,6 +916,13 @@ def _start_flask_server():
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
 if __name__ == "__main__":
-    print("Bot execution loop initialized. Polling for triggers...")
+    if not HAS_BOT_TOKEN:
+        print("BOT_TOKEN is not set. Telegram polling is disabled; Flask API will still start.")
+    else:
+        print("Bot execution loop initialized. Polling for triggers...")
     threading.Thread(target=_start_flask_server, daemon=True).start()
-    bot.infinity_polling()
+    if HAS_BOT_TOKEN:
+        bot.infinity_polling()
+    else:
+        while True:
+            time.sleep(3600)
