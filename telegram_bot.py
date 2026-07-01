@@ -17,12 +17,16 @@ import pillow_avif
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # CONFIGURATION
-BOT_TOKEN = (
+BOT_TOKEN_RAW = (
     os.environ.get("BOT_TOKEN")
     or os.environ.get("TELEGRAM_BOT_TOKEN")
     or os.environ.get("TG_BOT_TOKEN")
     or ""
 )
+
+# TeleBot validates tokens at construction time, so keep a safe fallback token
+# and use HAS_BOT_TOKEN to control whether Telegram polling is enabled.
+BOT_TOKEN = BOT_TOKEN_RAW if (":" in BOT_TOKEN_RAW) else "123456:placeholder"
 GOOGLE_SHEET_WEBHOOK_URL = os.environ.get(
     "GOOGLE_SHEET_WEBHOOK_URL",
     "https://script.google.com/macros/s/AKfycbzOpYU6DGMqNtoFBg8E_i7kq4_rhI1I6AveEqfPcpkJQcjXFtUjmObzSM8_iFwnczGm/exec",
@@ -30,7 +34,7 @@ GOOGLE_SHEET_WEBHOOK_URL = os.environ.get(
 N8N_TRIGGER_URL = os.environ.get("N8N_TRIGGER_URL", "https://n8n-production-3b51.up.railway.app/webhook-test/n8n-trigger")
 N8N_POSTING_URL = os.environ.get("N8N_POSTING_URL", "https://n8n-production-3b51.up.railway.app/webhook-test/posting")
 
-HAS_BOT_TOKEN = bool(BOT_TOKEN)
+HAS_BOT_TOKEN = bool(BOT_TOKEN_RAW and ":" in BOT_TOKEN_RAW)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_PATH = os.path.join(BASE_DIR, "results.json")
@@ -146,7 +150,8 @@ def start_generation_job(chat_id, generation_mode):
         args=(job_id, state["price"], state["source"], state["details_or_prompt"], generation_mode),
         daemon=True,
     ).start()
-    threading.Thread(target=monitor_and_request_approval, args=(chat_id, job_id), daemon=True).start()
+    if HAS_BOT_TOKEN:
+        threading.Thread(target=monitor_and_request_approval, args=(chat_id, job_id), daemon=True).start()
 
 def sync_and_trigger_webhooks(chat_id, target_n8n_url):
     """Fires the payload to BOTH Google Sheets and n8n via POST request."""
