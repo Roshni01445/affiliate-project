@@ -947,7 +947,7 @@ def _run_bot_polling_with_retries():
             time.sleep(backoff_seconds)
             backoff_seconds = min(backoff_seconds * 2, 300)
 
-if __name__ == "__main__":
+def main():
     if not RUN_TELEGRAM:
         print("Telegram polling is disabled in this environment; Flask API will still start.")
     else:
@@ -963,3 +963,6 @@ if __name__ == "__main__":
     else:
         while True:
             time.sleep(3600)
+
+if __name__ == "__main__":
+    main()
