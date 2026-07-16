@@ -541,4 +541,7 @@ def monitor_background_job(chat_id, job_id):
 
 if __name__ == '__main__':
     print("Bot execution loop initialized. Polling for triggers...")
+    bot.set_my_commands([
+        types.BotCommand("/start", "Restart the bot and start over")
+    ])
     bot.infinity_polling()
