@@ -12,8 +12,10 @@ RUN playwright install chromium
 # Copy all your bot files and your chrome profile
 COPY . .
 
+ENV PYTHONUNBUFFERED=1
+
 # Expose the Hugging Face port
 EXPOSE 7860
 
 # Start both the Telegram bot and the Flask server at the same time
-CMD python telegram_bot.py & python gemini_robot.py
+CMD bash -lc "python telegram_bot.py & exec python gemini_robot.py"

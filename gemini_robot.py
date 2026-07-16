@@ -18,19 +18,18 @@ app = Flask(__name__)
 # ==========================================
 # PATH & GLOBAL CONFIGURATION (UPDATED FOR CLOUD)
 # ==========================================
-# Use the current working directory instead of hardcoded Windows D:\ drive
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_PATH = os.path.join(BASE_DIR, "results.json")
 
-# Dynamically create the generated_images folder in the same folder as the script
 IMAGE_DIR = os.path.join(BASE_DIR, "generated_images")
 os.makedirs(IMAGE_DIR, exist_ok=True) 
 
 RESULTS_LOCK = threading.Lock()
 PROFILE_LOCK = threading.Lock()
 JOB_TIMEOUT_SECONDS = 900  
+PORT = int(os.environ.get("PORT", "7860"))
+HEADLESS = os.environ.get("HEADLESS", "true").lower() in {"1", "true", "yes", "on"}
 
-# Default Chrome paths, including standard Linux paths for cloud deployment
 DEFAULT_CHROME_PATHS = [
     "/usr/bin/chromium", 
     "/usr/bin/chromium-browser",
@@ -46,7 +45,6 @@ def resolve_chrome_executable_path():
     for path in DEFAULT_CHROME_PATHS:
         if os.path.exists(path):
             return path
-    # If standard paths fail, assume playwright's internal chromium will be used
     return None
 
 def build_image_prompt(price, custom_prompt=""):
@@ -100,7 +98,8 @@ def update_result(job_id, payload):
         data[job_id] = payload
         save_results(data)
 
-def run_job(job_id, price, image_url, custom_prompt=""):
+# ADDED job_type PARAMETER (Defaults to "image" to prevent accidental video generation)
+def run_job(job_id, price, image_url, custom_prompt="", job_type="image"):
     job_done = threading.Event()
 
     def safe_update(payload):
@@ -120,7 +119,6 @@ def run_job(job_id, price, image_url, custom_prompt=""):
 
     safe_update({"status": "processing", "message": "Downloading provided user image..."})
     
-    # We will pass this to Playwright. If it's None, Playwright uses its internal browser.
     chrome_path = resolve_chrome_executable_path()
 
     temp_dir = tempfile.gettempdir()
@@ -128,7 +126,6 @@ def run_job(job_id, price, image_url, custom_prompt=""):
     temp_image_path = os.path.join(temp_dir, f"direct_upload_{job_id}.png")
 
     try:
-        # Directly download the image file provided by the Telegram Bot
         response = requests.get(image_url, stream=True, timeout=20)
         if response.status_code == 200:
             with open(temp_original_path, "wb") as f:
@@ -145,7 +142,6 @@ def run_job(job_id, price, image_url, custom_prompt=""):
         timeout_timer.cancel()
         return
 
-    # Normalize image to PNG format
     try:
         image = Image.open(temp_original_path)
         if image.mode in ("RGBA", "P"):
@@ -175,10 +171,9 @@ def run_job(job_id, price, image_url, custom_prompt=""):
     # --- IN-SESSION DUAL PHASE PIPELINE ---
     try:
         with PROFILE_LOCK, sync_playwright() as p:
-            # Set up kwargs for launch_persistent_context
             launch_args = {
                 "user_data_dir": os.path.join(BASE_DIR, "chrome_automation_profile"),
-                "headless": True, # MUST BE TRUE FOR CLOUD DEPLOYMENT
+                "headless": HEADLESS,
                 "accept_downloads": True,
                 "ignore_default_args": ["--enable-automation"],
                 "args": [
@@ -187,7 +182,6 @@ def run_job(job_id, price, image_url, custom_prompt=""):
                     "--disable-web-security",
                 ]
             }
-            # Only add executable_path if we found one, otherwise let Playwright use its default
             if chrome_path:
                 launch_args["executable_path"] = chrome_path
 
@@ -211,7 +205,7 @@ def run_job(job_id, price, image_url, custom_prompt=""):
 
             for attempt in range(3):
                 try:
-                    chat_box.click()
+                    chat_box.click(force=True)
                     page.wait_for_timeout(300)
                     chat_box.press("Control+A")
                     chat_box.press("Backspace")
@@ -248,12 +242,19 @@ def run_job(job_id, price, image_url, custom_prompt=""):
                 }""",
                 {"imageB64": image_b64, "mimeType": "image/png", "selector": prompt_selector},
             )
-            chat_box.click()
+            chat_box.click(force=True)
             chat_box.press("Control+V")
             page.wait_for_timeout(4000)
 
             send_btn = page.locator('button[aria-label="Send message"], button.send-button, mat-icon:has-text("send"), button[type="submit"], button[data-testid="send-button"]').first
-            send_btn.click()
+            
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(500)
+            except:
+                pass
+
+            send_btn.click(force=True)
 
             page.wait_for_timeout(8000)  
 
@@ -285,7 +286,7 @@ def run_job(job_id, price, image_url, custom_prompt=""):
                     ).first
                     if download_button.count() > 0 and download_button.is_visible():
                         with page.expect_download(timeout=30000) as download_info:
-                            download_button.click()
+                            download_button.click(force=True)
                         download = download_info.value
                         download.save_as(downloaded_img_path)
                         img_download_success = True
@@ -333,87 +334,94 @@ def run_job(job_id, price, image_url, custom_prompt=""):
                 current_url = page.url
                 raise RuntimeError(f"Failed to extract lookbook image layout. Current page: {current_url}")
 
-            # --- PHASE 2: VIDEO ANIMATION ---
-            safe_update({"status": "processing", "message": "Starting Video Generation..."})
-            page.goto("https://gemini.google.com/app", wait_until="domcontentloaded")
-            page.wait_for_timeout(5000) 
-            page.wait_for_selector(prompt_selector, timeout=120000, state="visible")
-            chat_box = page.locator(prompt_selector).first
+            # --- PHASE 2: VIDEO ANIMATION (CONDITIONALLY TRIGGERED) ---
+            if job_type in ["video", "both"]:
+                safe_update({"status": "processing", "message": "Starting Video Generation..."})
+                page.goto("https://gemini.google.com/app", wait_until="domcontentloaded")
+                page.wait_for_timeout(5000) 
+                page.wait_for_selector(prompt_selector, timeout=120000, state="visible")
+                chat_box = page.locator(prompt_selector).first
 
-            with open(downloaded_img_path, "rb") as final_image_file:
-                gen_image_b64 = base64.b64encode(final_image_file.read()).decode("ascii")
+                with open(downloaded_img_path, "rb") as final_image_file:
+                    gen_image_b64 = base64.b64encode(final_image_file.read()).decode("ascii")
 
-            chat_box.click()
-            chat_box.press("Control+A")
-            chat_box.press("Backspace")
-            page.evaluate("async ({ text }) => { await navigator.clipboard.writeText(text); }", {"text": video_prompt_text})
-            chat_box.press("Control+V")
-            page.wait_for_timeout(2000)
+                chat_box.click(force=True)
+                chat_box.press("Control+A")
+                chat_box.press("Backspace")
+                page.evaluate("async ({ text }) => { await navigator.clipboard.writeText(text); }", {"text": video_prompt_text})
+                chat_box.press("Control+V")
+                page.wait_for_timeout(2000)
 
-            page.evaluate(
-                """async ({ imageB64, mimeType, selector }) => {
-                    const target = document.querySelector(selector);
-                    if (!target) throw new Error("Prompt element not found.");
-                    const dataUrl = `data:${mimeType};base64,${imageB64}`;
-                    const response = await fetch(dataUrl);
-                    const blob = await response.blob();
-                    const item = new ClipboardItem({ [mimeType]: blob });
-                    await navigator.clipboard.write([item]);
-                }""",
-                {"imageB64": gen_image_b64, "mimeType": "image/png", "selector": prompt_selector},
-            )
-            chat_box.click()
-            chat_box.press("Control+V")
-            page.wait_for_timeout(4000)
-            send_btn.click()
-            page.wait_for_timeout(8000)
-            
-            try:
-                page.locator('text=Generating video, text=Creating your video, div[aria-label*="video"]').first.wait_for(state="visible", timeout=25000)
-            except PlaywrightTimeoutError: pass
-
-            video_rendered = False
-            for check in range(12): 
-                if page.locator('video').count() > 0:
-                    video_rendered = True
-                    break
-                page.wait_for_timeout(5000)
-
-            if not video_rendered:
-                page.reload(wait_until="domcontentloaded")
-                page.wait_for_timeout(8000)
-
-            safe_update({"status": "processing", "message": "Downloading video asset..."})
-            vid_download_success = False
-            try:
-                video_b64 = page.evaluate("""async () => {
-                    const video = document.querySelector('video');
-                    if (!video || !video.src) return null;
-                    const res = await fetch(video.src);
-                    const blob = await res.blob();
-                    return new Promise((resolve) => {
-                        const reader = new FileReader();
-                        reader.onloadend = () => resolve(reader.result);
-                        reader.readAsDataURL(blob);
-                    });
-                }""")
-                if video_b64 and "base64," in video_b64:
-                    with open(downloaded_vid_path, "wb") as f:
-                        f.write(base64.b64decode(video_b64.split("base64,")[1]))
-                    vid_download_success = True
-            except: pass
-
-            if not vid_download_success:
+                page.evaluate(
+                    """async ({ imageB64, mimeType, selector }) => {
+                        const target = document.querySelector(selector);
+                        if (!target) throw new Error("Prompt element not found.");
+                        const dataUrl = `data:${mimeType};base64,${imageB64}`;
+                        const response = await fetch(dataUrl);
+                        const blob = await response.blob();
+                        const item = new ClipboardItem({ [mimeType]: blob });
+                        await navigator.clipboard.write([item]);
+                    }""",
+                    {"imageB64": gen_image_b64, "mimeType": "image/png", "selector": prompt_selector},
+                )
+                chat_box.click(force=True)
+                chat_box.press("Control+V")
+                page.wait_for_timeout(4000)
+                
                 try:
-                    video_download_button = page.locator('button[aria-label*="Download video"], a[download][href*="video"], button:has(svg[aria-label*="Download"])').last
-                    with page.expect_download(timeout=60000) as video_download_info:
-                        video_download_button.click()
-                    video_download_info.value.save_as(downloaded_vid_path)
-                    vid_download_success = True
+                    page.keyboard.press("Escape")
+                except:
+                    pass
+                send_btn.click(force=True)
+                
+                page.wait_for_timeout(8000)
+                
+                try:
+                    page.locator('text=Generating video, text=Creating your video, div[aria-label*="video"]').first.wait_for(state="visible", timeout=25000)
+                except PlaywrightTimeoutError: pass
+
+                video_rendered = False
+                for check in range(12): 
+                    if page.locator('video').count() > 0:
+                        video_rendered = True
+                        break
+                    page.wait_for_timeout(5000)
+
+                if not video_rendered:
+                    page.reload(wait_until="domcontentloaded")
+                    page.wait_for_timeout(8000)
+
+                safe_update({"status": "processing", "message": "Downloading video asset..."})
+                vid_download_success = False
+                try:
+                    video_b64 = page.evaluate("""async () => {
+                        const video = document.querySelector('video');
+                        if (!video || !video.src) return null;
+                        const res = await fetch(video.src);
+                        const blob = await res.blob();
+                        return new Promise((resolve) => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => resolve(reader.result);
+                            reader.readAsDataURL(blob);
+                        });
+                    }""")
+                    if video_b64 and "base64," in video_b64:
+                        with open(downloaded_vid_path, "wb") as f:
+                            f.write(base64.b64decode(video_b64.split("base64,")[1]))
+                        vid_download_success = True
                 except: pass
 
-            if not vid_download_success:
-                raise RuntimeError("Failed to capture video asset.")
+                if not vid_download_success:
+                    try:
+                        video_download_button = page.locator('button[aria-label*="Download video"], a[download][href*="video"], button:has(svg[aria-label*="Download"])').last
+                        with page.expect_download(timeout=60000) as video_download_info:
+                            video_download_button.click(force=True)
+                        video_download_info.value.save_as(downloaded_vid_path)
+                        vid_download_success = True
+                    except: pass
+
+                if not vid_download_success:
+                    raise RuntimeError("Failed to capture video asset.")
             
             context.close()
 
@@ -423,12 +431,16 @@ def run_job(job_id, price, image_url, custom_prompt=""):
         timeout_timer.cancel()
         return
 
-    safe_update({
+    # Dynamic successful response construction
+    final_payload = {
         "status": "success",
         "image_url": f"/image/{job_id}.jpg",
-        "video_url": f"/video/{job_id}.mp4",
         "message": "Success!"
-    })
+    }
+    if job_type in ["video", "both"]:
+        final_payload["video_url"] = f"/video/{job_id}.mp4"
+
+    safe_update(final_payload)
 
 @app.route("/generate-collage", methods=["POST"])
 def generate_collage():
@@ -436,13 +448,14 @@ def generate_collage():
     price = data.get("price")
     image_url = data.get("image_url")
     custom_prompt = data.get("prompt", "")
+    job_type = data.get("job_type", "image") # Read job_type target if passed via webhook
 
     if not price or not image_url:
         return jsonify({"status": "error", "message": "Missing price or image_url"}), 400
 
     job_id = uuid.uuid4().hex
     update_result(job_id, {"status": "pending"})
-    thread = threading.Thread(target=run_job, args=(job_id, price, image_url, custom_prompt), daemon=True)
+    thread = threading.Thread(target=run_job, args=(job_id, price, image_url, custom_prompt, job_type), daemon=True)
     thread.start()
 
     return jsonify({"status": "accepted", "job_id": job_id}), 202
@@ -461,7 +474,6 @@ def get_image(filename):
     out_path = os.path.join(IMAGE_DIR, f"{job_id}.jpg")
     if os.path.exists(out_path): return send_file(out_path, mimetype="image/jpeg")
     
-    # Simple search for the file
     if os.path.exists(IMAGE_DIR):
         for f in os.listdir(IMAGE_DIR):
             if f.startswith(job_id):
@@ -476,5 +488,4 @@ def get_video(filename):
     return jsonify({"status": "error", "message": "Video not found"}), 404
 
 if __name__ == "__main__":
-    # Updated port to 7860 for Hugging Face Spaces compatibility
-    app.run(host="0.0.0.0", port=7860, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)

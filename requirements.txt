@@ -5,3 +5,4 @@ pillow
 pillow-avif-plugin
 playwright
 playwright-stealth
+gradio_client
