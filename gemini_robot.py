@@ -29,6 +29,7 @@ PROFILE_LOCK = threading.Lock()
 JOB_TIMEOUT_SECONDS = 900  
 PORT = int(os.environ.get("PORT", "7860"))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() in {"1", "true", "yes", "on"}
+CHROME_PROFILE_DIR = os.environ.get("CHROME_PROFILE_DIR", os.path.join(BASE_DIR, "chrome_automation_profile"))
 
 DEFAULT_CHROME_PATHS = [
     "/usr/bin/chromium", 
@@ -81,6 +82,26 @@ def build_video_prompt():
         "Animate this fashion model image with subtle, natural human motion. Keep the camera static. "
         "Maintain 1-to-1 consistency for her face, outfit details, and the background without morphing."
     )
+
+def detect_gemini_login_required(page):
+    current_url = (page.url or "").lower()
+    if "accounts.google.com" in current_url:
+        return True
+
+    page_text = ""
+    try:
+        page_text = page.locator("body").inner_text(timeout=3000).lower()
+    except Exception:
+        page_text = ""
+
+    login_markers = [
+        "sign in",
+        "sign in to continue",
+        "choose an account",
+        "use your google account",
+        "verify it's you",
+    ]
+    return any(marker in page_text for marker in login_markers)
 
 def extract_generated_image_url(page):
     image_candidates = page.evaluate("""() => {
@@ -226,7 +247,7 @@ def run_job(job_id, price, image_url, custom_prompt="", job_type="image"):
     try:
         with PROFILE_LOCK, sync_playwright() as p:
             launch_args = {
-                "user_data_dir": os.path.join(BASE_DIR, "chrome_automation_profile"),
+                "user_data_dir": CHROME_PROFILE_DIR,
                 "headless": HEADLESS,
                 "accept_downloads": True,
                 "ignore_default_args": ["--enable-automation"],
@@ -251,6 +272,11 @@ def run_job(job_id, price, image_url, custom_prompt="", job_type="image"):
             # --- PHASE 1: GENERATE LOOKBOOK IMAGE ---
             safe_update({"status": "processing", "message": "Opening Gemini Session..."})
             page.goto("https://gemini.google.com/app", wait_until="domcontentloaded")
+
+            if detect_gemini_login_required(page):
+                raise RuntimeError(
+                    "Gemini login is required in the browser profile. Use a persistent Railway volume for CHROME_PROFILE_DIR and sign in once."
+                )
             
             page.wait_for_selector(prompt_selector, timeout=60000, state="visible")
             page.wait_for_timeout(2000)
