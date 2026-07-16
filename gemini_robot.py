@@ -135,7 +135,7 @@ def extract_generated_image_url(page):
         }
 
         return results;
-    }"")
+    }""")
 
     filtered_candidates = []
     for candidate in image_candidates:
