@@ -82,6 +82,60 @@ def build_video_prompt():
         "Maintain 1-to-1 consistency for her face, outfit details, and the background without morphing."
     )
 
+def extract_generated_image_url(page):
+    image_candidates = page.evaluate("""() => {
+        const selectors = [
+            'main img',
+            'article img',
+            '[role="main"] img',
+            '[data-testid*="response"] img',
+            '[data-testid*="result"] img',
+            '[class*="response"] img',
+            '[class*="result"] img'
+        ];
+
+        const seen = new Set();
+        const results = [];
+
+        for (const selector of selectors) {
+            for (const img of document.querySelectorAll(selector)) {
+                const src = img.getAttribute('src') || '';
+                if (!src || seen.has(src)) continue;
+                seen.add(src);
+
+                const alt = (img.getAttribute('alt') || '').toLowerCase();
+                const title = (img.getAttribute('title') || '').toLowerCase();
+                const className = (img.className || '').toString().toLowerCase();
+                const width = img.naturalWidth || img.clientWidth || 0;
+                const height = img.naturalHeight || img.clientHeight || 0;
+
+                results.push({ src, alt, title, className, width, height });
+            }
+        }
+
+        return results;
+    }"")
+
+    filtered_candidates = []
+    for candidate in image_candidates:
+        src = candidate.get("src") or ""
+        alt = (candidate.get("alt") or "").lower()
+        title = (candidate.get("title") or "").lower()
+        class_name = (candidate.get("className") or "").lower()
+        width = int(candidate.get("width") or 0)
+        height = int(candidate.get("height") or 0)
+
+        if not src.startswith(("http://", "https://", "blob:")):
+            continue
+        if width and height and (width < 256 or height < 256):
+            continue
+        if any(token in alt or token in title or token in class_name for token in ["profile", "avatar", "user-icon", "icon", "logo"]):
+            continue
+
+        filtered_candidates.append(candidate)
+
+    return filtered_candidates[0]["src"] if filtered_candidates else None
+
 def load_results():
     if not os.path.exists(RESULTS_PATH):
         return {}
@@ -294,22 +348,7 @@ def run_job(job_id, price, image_url, custom_prompt="", job_type="image"):
                 except Exception:
                     pass
 
-                image_probe = page.evaluate("""() => {
-                    const imgCandidates = Array.from(document.querySelectorAll('img')).map((img) => {
-                        return { src: img.getAttribute('src') || '', w: img.naturalWidth || 0, h: img.naturalHeight || 0 };
-                    });
-                    const googleImgs = imgCandidates.filter((img) => img.src.includes('googleusercontent'));
-                    const filteredGoogle = googleImgs.filter((img) => !img.src.includes('s64') && !img.src.includes('=s64') && img.w >= 256 && img.h >= 256);
-                    const blobImgs = imgCandidates.filter((img) => img.src.startsWith('blob:'));
-
-                    if (filteredGoogle.length > 0) {
-                        filteredGoogle.sort((a, b) => (b.w * b.h) - (a.w * a.h));
-                        return { final: filteredGoogle[0].src };
-                    }
-                    return { final: blobImgs[0]?.src || null };
-                }""")
-                
-                final_image_url = image_probe.get("final")
+                final_image_url = extract_generated_image_url(page)
                 
                 if final_image_url and final_image_url.startswith("http"):
                     try:
