@@ -9,6 +9,7 @@ import requests
 import json
 import socket
 import urllib3.util.connection as urllib3_cn
+from telebot.apihelper import ApiTelegramException
 
 # --- IPv4 NETWORK FIX ---
 urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
@@ -544,4 +545,16 @@ if __name__ == '__main__':
     bot.set_my_commands([
         types.BotCommand("/start", "Restart the bot and start over")
     ])
-    bot.infinity_polling()
+
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
+        except ApiTelegramException as exc:
+            if getattr(exc, "error_code", None) == 409:
+                print("Another bot instance is already polling this token. Retrying after a delay...")
+                time.sleep(15)
+                continue
+            raise
+        except Exception as exc:
+            print(f"Polling stopped unexpectedly: {exc}")
+            time.sleep(15)
