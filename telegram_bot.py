@@ -495,7 +495,11 @@ def monitor_and_request_approval(chat_id, job_id):
         elif job_id in data and data[job_id].get("status") == "error":
             markup = types.InlineKeyboardMarkup()
             markup.add(types.InlineKeyboardButton("🔄 Retry Generation", callback_data=f"retry_{job_id}"))
-            bot.send_message(chat_id, f"⚠️ Pipeline failed: {data[job_id].get('message')}", reply_markup=markup)
+
+            raw_error = str(data[job_id].get('message', 'Unknown error'))
+            safe_error = raw_error[:3500] + "... [Error Truncated]" if len(raw_error) > 3500 else raw_error
+
+            bot.send_message(chat_id, f"⚠️ Pipeline failed: {safe_error}", reply_markup=markup)
             return
             
     bot.send_message(chat_id, "⏱️ Generation operation timed out.")
