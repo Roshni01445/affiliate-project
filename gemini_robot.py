@@ -100,6 +100,10 @@ def detect_gemini_login_required(page):
         "choose an account",
         "use your google account",
         "verify it's you",
+        "meet gemini",
+        "google gemini",
+        "google's ai assistant",
+        "start chatting",
     ]
     return any(marker in page_text for marker in login_markers)
 
