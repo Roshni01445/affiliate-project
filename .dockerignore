@@ -1,0 +1,11 @@
+.venv/
+ffmpeg-8.1.1-essentials_build/
+chrome_automation_profile/
+generated_images/
+results.json
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.git/
+.gitignore

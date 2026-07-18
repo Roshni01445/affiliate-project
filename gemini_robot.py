@@ -29,7 +29,7 @@ PROFILE_LOCK = threading.Lock()
 JOB_TIMEOUT_SECONDS = 900  
 PORT = int(os.environ.get("PORT", "7860"))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() in {"1", "true", "yes", "on"}
-CHROME_PROFILE_DIR = os.environ.get("CHROME_PROFILE_DIR", os.path.join(BASE_DIR, "chrome_automation_profile"))
+CHROME_PROFILE_DIR = os.environ.get("CHROME_PROFILE_DIR", "/data/chrome_automation_profile")
 
 DEFAULT_CHROME_PATHS = [
     "/usr/bin/chromium", 
@@ -102,6 +102,23 @@ def detect_gemini_login_required(page):
         "verify it's you",
     ]
     return any(marker in page_text for marker in login_markers)
+
+def prepare_chrome_profile_dir(profile_dir):
+    os.makedirs(profile_dir, exist_ok=True)
+
+    stale_paths = [
+        os.path.join(profile_dir, "Default", "Cache"),
+        os.path.join(profile_dir, "Default", "Code Cache"),
+        os.path.join(profile_dir, "Default", "GPUCache"),
+        os.path.join(profile_dir, "Default", "DawnGraphiteCache"),
+        os.path.join(profile_dir, "Default", "DawnWebGPUCache"),
+        os.path.join(profile_dir, "GrShaderCache"),
+        os.path.join(profile_dir, "ShaderCache"),
+    ]
+
+    for stale_path in stale_paths:
+        if os.path.isdir(stale_path):
+            shutil.rmtree(stale_path, ignore_errors=True)
 
 def extract_generated_image_url(page):
     image_candidates = page.evaluate("""() => {
@@ -245,6 +262,8 @@ def run_job(job_id, price, image_url, custom_prompt="", job_type="image"):
 
     # --- IN-SESSION DUAL PHASE PIPELINE ---
     try:
+        prepare_chrome_profile_dir(CHROME_PROFILE_DIR)
+
         with PROFILE_LOCK, sync_playwright() as p:
             launch_args = {
                 "user_data_dir": CHROME_PROFILE_DIR,

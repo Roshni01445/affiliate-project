@@ -9,7 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install chromium
 
-# Copy all your bot files and your chrome profile
+# Copy all your bot files. Chrome profile is excluded via .dockerignore and recreated at runtime.
 COPY . .
 
 ENV PYTHONUNBUFFERED=1
