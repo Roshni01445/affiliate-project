@@ -2,6 +2,7 @@
 ffmpeg-8.1.1-essentials_build/
 generated_images/
 results.json
+auth.json
 *.zip
 __pycache__/
 *.pyc

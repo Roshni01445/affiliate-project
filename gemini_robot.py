@@ -124,6 +124,9 @@ def prepare_chrome_profile_dir(profile_dir):
         if os.path.isdir(stale_path):
             shutil.rmtree(stale_path, ignore_errors=True)
 
+def get_auth_state_path():
+    return os.environ.get("GEMINI_AUTH_STATE_PATH", os.path.join(BASE_DIR, "auth.json"))
+
 def extract_generated_image_url(page):
     image_candidates = page.evaluate("""() => {
         const selectors = [
@@ -266,11 +269,14 @@ def run_job(job_id, price, image_url, custom_prompt="", job_type="image"):
 
     # --- IN-SESSION DUAL PHASE PIPELINE ---
     try:
-        prepare_chrome_profile_dir(CHROME_PROFILE_DIR)
+        auth_path = get_auth_state_path()
+        has_auth_state = os.path.exists(auth_path)
+        browser = None
+        if not has_auth_state:
+            prepare_chrome_profile_dir(CHROME_PROFILE_DIR)
 
         with PROFILE_LOCK, sync_playwright() as p:
             launch_args = {
-                "user_data_dir": CHROME_PROFILE_DIR,
                 "headless": HEADLESS,
                 "accept_downloads": True,
                 "ignore_default_args": ["--enable-automation"],
@@ -283,7 +289,13 @@ def run_job(job_id, price, image_url, custom_prompt="", job_type="image"):
             if chrome_path:
                 launch_args["executable_path"] = chrome_path
 
-            context = p.chromium.launch_persistent_context(**launch_args)
+            if has_auth_state:
+                browser = p.chromium.launch(**launch_args)
+                context = browser.new_context(storage_state=auth_path, accept_downloads=True)
+            else:
+                launch_args["user_data_dir"] = CHROME_PROFILE_DIR
+                context = p.chromium.launch_persistent_context(**launch_args)
+
             context.grant_permissions(["clipboard-read", "clipboard-write"], origin="https://gemini.google.com")
 
             page = context.pages[0] if context.pages else context.new_page()
@@ -510,8 +522,10 @@ def run_job(job_id, price, image_url, custom_prompt="", job_type="image"):
 
                 if not vid_download_success:
                     raise RuntimeError("Failed to capture video asset.")
-            
+
             context.close()
+            if browser:
+                browser.close()
 
     except Exception as exc:
         safe_update({"status": "error", "message": f"Automation error: {str(exc)}"})
